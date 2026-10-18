@@ -1,0 +1,271 @@
+user nginx;
+worker_processes 2;
+worker_rlimit_nofile 65535;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    server_tokens off;
+
+    # 性能优化日志格式
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/access.log main buffer=32k;
+
+    # 性能优化
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    # 静态文件缓存（减少 2C 机器的 syscall 开销）
+    open_file_cache max=2000 inactive=60s;
+    open_file_cache_valid 120s;
+    open_file_cache_min_uses 2;
+    open_file_cache_errors on;
+
+    # 与 RustFS 的 RUSTFS_MAX_REQUEST_SIZE (5 GiB) 保持一致
+    client_max_body_size 5120m;
+
+    # 缓冲优化（128M 内存限制下的保守值）
+    client_body_buffer_size 128k;
+    client_header_buffer_size 32k;
+    large_client_header_buffers 4 64k;
+    proxy_buffering on;
+    proxy_buffer_size 64k;
+    proxy_buffers 8 64k;
+    proxy_busy_buffers_size 128k;
+
+    # Gzip压缩
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_types text/plain text/css text/xml text/javascript
+               application/json application/javascript application/xml+rss
+               application/rss+xml application/atom+xml image/svg+xml
+               text/x-component text/x-cross-domain-policy;
+    gzip_disable "msie6";
+
+    # 上游服务器
+    upstream rustfs_console {
+        server rustfs:9001;
+        keepalive 32;
+    }
+
+    upstream rustfs_api {
+        server rustfs:9000;
+        keepalive 32;
+    }
+
+    upstream rustfs_webdav {
+        server rustfs:8080;
+        keepalive 32;
+    }
+
+    upstream frps_vhost {
+        server host.docker.internal:7001;
+        keepalive 32;
+    }
+
+    # HTTP：健康检查、ACME 与 HTTPS 跳转
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name _;
+
+        location = /healthz {
+            access_log off;
+            return 200 "ok\n";
+        }
+
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            return 301 https://$host$request_uri;
+        }
+    }
+
+    # ============ HTTPS 配置 ============
+
+    # 存储管理控制台 (storage.${ROOT_DOMAIN})
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name storage.${ROOT_DOMAIN};
+
+        ssl_certificate /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location = / {
+            return 302 /rustfs/console/;
+        }
+
+        location / {
+            proxy_pass http://rustfs_console;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_request_buffering off;
+        }
+    }
+
+    # S3 API (s3.${ROOT_DOMAIN})
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name s3.${ROOT_DOMAIN};
+
+        ssl_certificate /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location / {
+            proxy_pass http://rustfs_api;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_request_buffering off;
+            proxy_buffering off;
+        }
+    }
+
+    # WebDAV (webdav.${ROOT_DOMAIN})
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name webdav.${ROOT_DOMAIN};
+
+        ssl_certificate /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location / {
+            proxy_pass http://rustfs_webdav;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_request_buffering off;
+            proxy_buffering off;
+        }
+    }
+
+    # 静态网站 (${ROOT_DOMAIN})
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name ${ROOT_DOMAIN};
+
+        ssl_certificate /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location ~* \.(?:css|js|mjs|png|jpe?g|gif|svg|ico|webp|woff2?)$ {
+            root /usr/share/nginx/html;
+            expires 7d;
+            access_log off;
+            try_files $uri =404;
+        }
+
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+            expires 1h;
+            try_files $uri $uri.html $uri/ =404;
+        }
+    }
+
+    # FRP 虚拟主机代理 (frps.${ROOT_DOMAIN})
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name frps.${ROOT_DOMAIN};
+
+        ssl_certificate /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/fullchain.pem;
+        ssl_certificate_key /etc/nginx/ssl/live/s3.${ROOT_DOMAIN}/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_prefer_server_ciphers on;
+        ssl_session_cache shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+
+        location / {
+            proxy_pass http://frps_vhost;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+        }
+    }
+}

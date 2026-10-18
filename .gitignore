@@ -1,0 +1,17 @@
+# 密钥与环境配置
+.env
+.env.local
+.env.*.local
+
+# 备份与数据
+backups/
+rustdesk/data/
+
+# 历史备份（可能含旧密钥）
+bak/
+
+# 生成物
+nginx.conf
+docker-compose-real.yaml
+*.log
+*.tar.gz

@@ -1,0 +1,125 @@
+services:
+  rustfs:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_ACCESS_KEY: "${RUSTFS_ACCESS_KEY}"
+      RUSTFS_SECRET_KEY: "${RUSTFS_SECRET_KEY}"
+      RUSTFS_MAX_REQUEST_SIZE: "${RUSTFS_MAX_REQUEST_SIZE}"
+      # 原生 WebDAV 网关，TLS 由 Nginx 终止
+      RUSTFS_WEBDAV_ENABLE: "${RUSTFS_WEBDAV_ENABLE}"
+      RUSTFS_WEBDAV_ADDRESS: "${RUSTFS_WEBDAV_ADDRESS}"
+      RUSTFS_WEBDAV_TLS_ENABLED: "${RUSTFS_WEBDAV_TLS_ENABLED}"
+      RUSTFS_WEBDAV_MAX_BODY_SIZE: "${RUSTFS_MAX_REQUEST_SIZE}"
+      # 降低日志级别，减少 2C2G 机器的 IO/CPU 开销
+      RUSTFS_OBS_LOGGER_LEVEL: "warn"
+    volumes:
+      - rustfs-data:/data
+    networks:
+      - ${NETWORK_NAME}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+      start_period: ${HEALTHCHECK_START_PERIOD}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: ${DOCKER_LOG_DRIVER}
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE}
+        max-file: ${DOCKER_LOG_MAX_FILE}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.6'
+          memory: ${RUSTFS_MEM_LIMIT}
+        reservations:
+          cpus: '0.3'
+          memory: ${RUSTFS_MEM_RESERVE}
+
+  certbot:
+    image: certbot/certbot:v5.8.0
+    volumes:
+      - letsencrypt-certs:/etc/letsencrypt
+      - letsencrypt-www:/var/www/certbot:rw
+    entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+    networks:
+      - ${NETWORK_NAME}
+    depends_on:
+      nginx:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: ${DOCKER_LOG_DRIVER}
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE}
+        max-file: ${DOCKER_LOG_MAX_FILE}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: ${CERTBOT_MEM_LIMIT}
+        reservations:
+          cpus: '0.05'
+          memory: ${CERTBOT_MEM_RESERVE}
+
+  nginx:
+    image: nginx:1.30-alpine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "80:80"
+      - "443:443"
+    # 每 6 小时重载一次，使 certbot 续期后的证书生效
+    command:
+      - /bin/sh
+      - -c
+      - |
+        while :; do sleep 6h & wait $${!}; nginx -s reload; done &
+        exec nginx -g "daemon off;"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - letsencrypt-certs:/etc/nginx/ssl:ro
+      - letsencrypt-www:/var/www/certbot:ro
+      - nginx-cache:/var/cache/nginx
+      - ${WEB_DATA_DIR}:/usr/share/nginx/html:ro
+    networks:
+      - ${NETWORK_NAME}
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/healthz"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+      start_period: ${HEALTHCHECK_START_PERIOD}
+    restart: unless-stopped
+    logging:
+      driver: ${DOCKER_LOG_DRIVER}
+      options:
+        max-size: ${DOCKER_LOG_MAX_SIZE}
+        max-file: ${DOCKER_LOG_MAX_FILE}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.6'
+          memory: ${NGINX_MEM_LIMIT}
+        reservations:
+          cpus: '0.2'
+          memory: ${NGINX_MEM_RESERVE}
+
+networks:
+  storage-net:
+    driver: ${NETWORK_DRIVER}
+
+volumes:
+  rustfs-data:
+  letsencrypt-certs:
+  letsencrypt-www:
+  nginx-cache:

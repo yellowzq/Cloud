@@ -1,0 +1,27 @@
+# 用于初始化证书的临时配置
+# 仅运行 Certbot 获取证书，无需 Nginx
+
+services:
+  certbot-init:
+    image: certbot/certbot:v5.8.0
+    volumes:
+      - letsencrypt-certs:/etc/letsencrypt
+      - letsencrypt-www:/var/www/certbot:rw
+      - ./certbot-init.sh:/certbot-init.sh:ro
+    ports:
+      - "80:80"
+    entrypoint: /bin/sh
+    command:
+      - /certbot-init.sh
+    environment:
+      MAIN_EMAIL: ${MAIN_EMAIL}
+      S3_DOMAIN: ${S3_DOMAIN}
+      STORAGE_DOMAIN: ${STORAGE_DOMAIN}
+      WEBDAV_DOMAIN: ${WEBDAV_DOMAIN}
+      ROOT_DOMAIN: ${ROOT_DOMAIN}
+      FRPS_DOMAIN: ${FRPS_DOMAIN}
+    # 注：初始化阶段不需要加入网络
+
+volumes:
+  letsencrypt-certs:
+  letsencrypt-www:
