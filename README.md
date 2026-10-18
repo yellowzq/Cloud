@@ -78,6 +78,37 @@ WebDAV 由 RustFS 原生网关提供（容器内监听 `8080`），Nginx 在 `we
 echo | openssl s_client -servername s3.your-domain.com -connect s3.your-domain.com:443 2>/dev/null | openssl x509 -noout -dates
 ```
 
+## 2 核 2G 调优
+
+| 项 | 值 | 说明 |
+|----|----|------|
+| Nginx | 128M / 2 worker / 1024 conns | 静态文件由 Nginx 直接读取 |
+| RustFS | 640M | 实测空闲约 90M，留出上传/索引余量 |
+| Certbot | 128M | 仅续期时短暂运行 |
+| gzip | level 5 | 降低 CPU 占用 |
+| 日志 | json-file 10m × 3 | 单容器最多约 30M |
+| 静态缓存 | `open_file_cache` + `expires` | 减少 syscall 与重复传输 |
+
+建议增加 swap 兜底：
+
+```bash
+fallocate -l 2G /swapfile && chmod 600 /swapfile
+mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+排查资源：`docker stats --no-stream`、`free -m`。
+
+## 环境模板
+
+仓库只跟踪 `.env.example`，真实 `.env` 已被 `.gitignore` 排除：
+
+```bash
+cp .env.example .env
+chmod 600 .env
+# 填写域名、邮箱、RUSTFS_ACCESS_KEY、RUSTFS_SECRET_KEY
+```
+
 ## 备份与恢复
 
 ```bash
