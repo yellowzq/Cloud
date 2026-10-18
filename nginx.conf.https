@@ -119,10 +119,6 @@ http {
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
 
-        location = / {
-            return 302 /rustfs/console/;
-        }
-
         location / {
             proxy_pass http://rustfs_console;
             proxy_http_version 1.1;

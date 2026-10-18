@@ -126,4 +126,5 @@ bash import_backups.sh [备份目录] [时间戳]
 - 证书申请失败：检查 DNS 与 80 端口，查看 `docker compose -p storage-net -f docker-compose-init.yaml logs`
 - 证书不存在：`bash run.sh init`
 - 服务无法访问：`bash run.sh logs nginx`
-- 控制台 403：非浏览器客户端访问 `/` 属正常行为，控制台路径为 `/rustfs/console/`
+- 控制台登录失败 / `SignatureDoesNotMatch: missing signed header: content-type`：登录会向 `/` 发送 `POST Action=AssumeRole`（STS 签名请求）。**不要为 `/` 配置 `return 302` 跳转**，否则签名请求会被改写为 GET 而失败；让 Nginx 原样代理到 RustFS 即可（RustFS 自己对浏览器 `/` 返回控制台跳转）。
+- 控制台 Server Configuration 留空（使用当前域名）；若改填 `https://s3.your-domain.com`，需同时给 S3 监听器配置 `RUSTFS_CORS_ALLOWED_ORIGINS=https://storage.your-domain.com`，否则浏览器会报 `Failed to fetch`。
